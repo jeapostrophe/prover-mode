@@ -39,7 +39,6 @@
     (delete-process prover--process)
     (setq prover--process nil)))
 
-
 (defun prover--command (sexpr)
   (with-current-buffer (process-buffer prover--process)
     (delete-region (point-min) (point-max))
@@ -67,11 +66,10 @@
                   (prover--draw-response data)
                   (prover--draw-goal goal)))))))))
 
-
 (defun prover-send-step ()
   "Send the proof step, and mark it read-only."
   (interactive)
-  (prover--command `(send))
+  (prover--command `(send ,(thing-at-point 'line)))
   ;; TODO: Make read-only, change appearance
   nil)
 
