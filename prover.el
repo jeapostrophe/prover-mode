@@ -1,59 +1,70 @@
-;;; prover.el
+;;; Library
+(require 'span)
 
-;; 0. Open this file and M-x eval-buffer.
-;;
-;; 1. Create a new buffer, "foo". In it:
-;;
-;; 2. M-x prover-proof-mode (this could happen automatically for file
-;;    extension like .proof files).
-;;
-;; 3. M-x prover-send-step. Should split adding two windows, *prover
-;;    responses* and *prover goal*. This came from prover.rkt.
-;;
-;; 4. M-x prover-unsend-step. Likewise.
+;; Copied from http://ergoemacs.org/emacs/modernization_elisp_lib_problem.html
+(defun j-trim-left (s)
+  "Remove whitespace at the beginning of S."
+  (if (string-match "\\`[ \t\n\r]+" s)
+      (replace-match "" t t s)
+    s))
 
-(define-derived-mode prover-proof-mode prog-mode
-  "proof"
-  "major mode for proofs
-\\{prover-proof-mode-map}"
-  (prover--connect)
-  nil)
+(defun j-trim-right (s)
+  "Remove whitespace at the end of S."
+  (if (string-match "[ \t\n\r]+\\'" s)
+      (replace-match "" t t s)
+    s))
 
-(defvar prover--prover.rkt
-  (expand-file-name "prover.rkt"
-                    (file-name-directory (or load-file-name (buffer-file-name))))
-  "Path to prover.rkt")
+(defun j-trim (s)
+  "Remove whitespace at the beginning and end of S."
+  (j-trim-left (j-trim-right s)))
 
-(defvar prover--current-point 1)
-(defvar prover--process nil)
+;;; Main mode
+
+(make-variable-buffer-local (defvar prover--current-point 1))
+(make-variable-buffer-local (defvar prover--process nil))
 
 (defvar prover-read-only-face 'highlight
   "Face for read-only region")
+(defvar prover-cmd
+  "/bin/cat"
+  "Command-line for prover process")
 
-(defun prover--clear-read-only (start end)
+(defun prover--read-only-hook (overlay after start end &optional len)
+  (unless inhibit-read-only
+    (error "read-only: Sent to prover")))
+(defun prover--clear-read-only (start)
   (let ((inhibit-read-only t))
-    (remove-overlays start end 'face prover-read-only-face)
-    (remove-text-properties start end '(read-only nil))))
+    (remove-overlays start (point-max)
+                     'face prover-read-only-face)
+    (remove-overlays start (point-max)
+                     'modification-hooks '(prover--read-only-hook))
+    (remove-overlays start (point-max)
+                     'insert-in-front-hooks '(prover--read-only-hook))))
+(defun prover--mark-read-only (end)
+  (let ((inhibit-read-only t)
+        (x (make-overlay (point-min) end)))
+    (prover--clear-read-only (point-min))
+    (overlay-put x 'face prover-read-only-face)
+    (overlay-put x 'modification-hooks '(prover--read-only-hook))
+    (overlay-put x 'insert-in-front-hooks '(prover--read-only-hook))))
 
-(defun prover--connect ()
+(defun prover-restart ()
+  "Restart the prover process"
+  (interactive)
   (prover--disconnect) ;; in case already running
   (if (get-buffer prover--responses-buffer-name)
       (kill-buffer prover--responses-buffer-name))
   (if (get-buffer prover--goal-buffer-name)
       (kill-buffer prover--goal-buffer-name))
   (setq prover--current-point (point-min))
-  (prover--clear-read-only (point-min) (point-max))
+  (prover--clear-read-only (point-min))
+  (message "starting %S" prover-cmd)
   (setq prover--process
-        (start-process "prover"
-                       (get-buffer-create " *prover process*")
-                       ;; FIXME
-                       "/Users/jay/Dev/scm/plt/racket/bin/racket"  
-                       prover--prover.rkt)))
-
-(defun prover-restart ()
-  "Restart the prover process"
-  (interactive)
-  (prover--connect))
+        (start-process-shell-command
+         "prover"
+         (get-buffer-create "*prover process*")
+         prover-cmd))
+  (prover-layout))
 
 (defun prover--disconnect ()
   (when prover--process
@@ -61,6 +72,8 @@
     (setq prover--process nil)))
 
 (defun prover--command (label arg)
+  (unless prover--process
+    (prover-restart))
   (with-current-buffer (process-buffer prover--process)
     (delete-region (point-min) (point-max))
     (process-send-string prover--process (format "%S\n" `(,label ,arg)))
@@ -86,23 +99,6 @@
                   (prover--draw-response label arg data)
                   (prover--draw-goal goal)))))))))
 
-;; Copied from http://ergoemacs.org/emacs/modernization_elisp_lib_problem.html
-(defun j-trim-left (s)
-  "Remove whitespace at the beginning of S."
-  (if (string-match "\\`[ \t\n\r]+" s)
-      (replace-match "" t t s)
-    s))
-
-(defun j-trim-right (s)
-  "Remove whitespace at the end of S."
-  (if (string-match "[ \t\n\r]+\\'" s)
-      (replace-match "" t t s)
-    s))
-
-(defun j-trim (s)
-  "Remove whitespace at the beginning and end of S."
-  (j-trim-left (j-trim-right s)))
-
 (defun prover-send-step ()
   "Send the proof step, and mark it read-only."
   (interactive)
@@ -110,10 +106,7 @@
          (end (scan-sexps start +1)))
     (when end
       (goto-char end)
-      (let* ((inhibit-read-only t)
-             (x (make-overlay start end)))
-        (overlay-put x 'face prover-read-only-face)
-        (put-text-property start (- end 1) 'read-only "read-only: Sent to prover"))
+      (prover--mark-read-only end)
       (setq prover--current-point end)
       (prover--command 'send (j-trim (buffer-substring-no-properties start end)))))
   nil)
@@ -126,19 +119,53 @@
     (when start
       (prover--command 'unsend "")
       (goto-char start)
-      (prover--clear-read-only start end)
+      (prover--clear-read-only start)
       (setq prover--current-point start)))
   nil)
 
-;;;
+(defun prover-goto-point ()
+  "Send or unsend proof steps until you get to this point"
+  (interactive)
+  (let* ((start prover--current-point)
+         (dest (point)))
+    (cond
+     ((< start dest)
+      (let ((last-pt (point)))
+        (prover-send-step)
+        (while (and (not (equal last-pt (point)))
+                    (< (point) dest))
+          (setq last-pt (point))
+          (prover-send-step))))
+     ((< dest start)
+      (let ((last-pt (point)))
+        (prover-unsend-step)
+        (while (and (not (equal last-pt (point)))
+                    (< dest (point)))
+          (setq last-pt (point))
+          (prover-unsend-step)))))))
 
+;;;###autoload
+(define-minor-mode prover-proof-mode
+  "minor mode for proofs"
+  :lighter " prover"
+  :keymap (let ((map (make-sparse-keymap)))
+            (define-key map (kbd "M-s-÷") 'prover-goto-point)
+            (define-key map (kbd "M-s-π") 'prover-goto-point)
+            (define-key map (kbd "M-s-≤") 'prover-unsend-step)
+            (define-key map (kbd "M-s-≥") 'prover-send-step)
+            map)
+  (prover-restart))
+
+(provide 'prover-proof-mode)
+
+;;; Response Log
+
+;;;###autoload
 (define-derived-mode prover-responses-mode fundamental-mode
   "responses"
   "major mode for responses"
   nil)
-
 (defconst prover--responses-buffer-name " *prover responses*")
-
 (defun prover--draw-response (label arg prover-sexpr)
   (let* ((buf (get-buffer-create prover--responses-buffer-name))
          (new? (not (get-buffer-window buf)))
@@ -147,21 +174,27 @@
                     (set-window-buffer (split-window-vertically)
                                        prover--responses-buffer-name)))))
     (with-current-buffer buf
-      (goto-char (point-max))
-      (insert (pcase label
-                (`send (format "> %s\n" arg))
-                (`unsend "<\n")))
-      (insert (format "%s\n" prover-sexpr)))))
+      (let ((inhibit-read-only t))
+        (setq scroll-conservatively 100)
+        (setq buffer-read-only t)
+        (goto-char (point-max))
+        (insert (pcase label
+                  (`send (format "> %s\n" arg))
+                  (`unsend "<\n")))
+        (insert (format "%s\n" prover-sexpr))))
+    (with-selected-window win
+      (goto-char (point-max)))))
 
-;;;
+(provide 'prover-responses-mode)
 
+;;; Goal
+
+;;;###autoload
 (define-derived-mode prover-goal-mode fundamental-mode
   "goal"
   "major mode for responses"
   nil)
-
 (defconst prover--goal-buffer-name " *prover goal*")
-
 (defun prover--draw-goal (new-goal)
   (let* ((buf (get-buffer-create prover--goal-buffer-name))
          (new? (not (get-buffer-window buf)))
@@ -169,10 +202,29 @@
                   (let ((window-combination-limit t))
                     (set-window-buffer (split-window-vertically)
                                        prover--goal-buffer-name)))))
+    
     (with-current-buffer buf
-      ;; only last goal
-      (delete-region (point-min) (point-max))
-      (insert new-goal))))
+      (let ((inhibit-read-only t))
+        (setq buffer-read-only t)
+        ;; only last goal
+        (delete-region (point-min) (point-max))
+        (insert new-goal)))))
 
-(global-set-key (kbd "M-s-≤") 'prover-unsend-step)
-(global-set-key (kbd "M-s-≥") 'prover-send-step)
+;;; Helper
+
+(defun prover-layout ()
+  "Layout the prover windows"
+  (interactive)
+  (delete-other-windows)
+  (if (< (window-body-width) (* 2 80))
+      (split-window-vertically)
+    (split-window-horizontally))
+  (switch-to-buffer (first (buffer-list)))
+  (other-window 1)
+  (split-window-vertically)
+  (switch-to-buffer prover--goal-buffer-name)
+  (other-window 1)
+  (switch-to-buffer prover--responses-buffer-name)
+  (other-window 1))
+
+(provide 'prover-goal-mode)
