@@ -58,7 +58,6 @@
       (kill-buffer prover--goal-buffer-name))
   (setq prover--current-point (point-min))
   (prover--clear-read-only (point-min))
-  (message "starting %S" prover-cmd)
   (setq prover--process
         (start-process-shell-command
          "prover"
