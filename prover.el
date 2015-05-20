@@ -1,5 +1,4 @@
 ;;; Library
-(require 'span)
 
 ;; Copied from http://ergoemacs.org/emacs/modernization_elisp_lib_problem.html
 (defun j-trim-left (s)
@@ -48,6 +47,9 @@
     (overlay-put x 'modification-hooks '(prover--read-only-hook))
     (overlay-put x 'insert-in-front-hooks '(prover--read-only-hook))))
 
+;; TODO show message on stderr in responses
+;; TODO send file name and position for srcloc
+
 (defun prover-restart ()
   "Restart the prover process"
   (interactive)
@@ -63,40 +65,55 @@
          "prover"
          (get-buffer-create "*prover process*")
          prover-cmd))
-  (prover-layout))
+  (prover-layout)
+  (prover--draw-response-raw
+   (prover--slurp)))
 
 (defun prover--disconnect ()
   (when prover--process
-    (delete-process prover--process)
-    (setq prover--process nil)))
+    (let ((buf (process-buffer prover--process)))
+      (delete-process prover--process)
+      (with-current-buffer buf
+        (delete-region (point-min) (point-max)))
+      (message "deleting prover--process")
+      (setq prover--process nil))))
+
+(defun prover--slurp ()
+  (cond
+   (prover--process
+    (with-current-buffer (process-buffer prover--process)
+      (with-timeout (10 (error "prover process timeout"))
+        (while (and (memq (process-status prover--process) '(open run))
+                    (or (condition-case ()
+                            (progn
+                              (goto-char (point-min))
+                              (forward-sexp 1)
+                              (= (point) (point-min)))
+                          (scan-error t))))
+          (accept-process-output nil 0.05))
+        (format "%s%s"
+                (buffer-substring (point-min) (point-max))
+                (if (not (memq (process-status prover--process) '(open run)))
+                    "\nprover process: Died"
+                  "")))))
+   (t
+    "prover process: does not exist")))
 
 (defun prover--command (label arg)
   (unless prover--process
     (prover-restart))
   (with-current-buffer (process-buffer prover--process)
     (delete-region (point-min) (point-max))
-    (process-send-string prover--process (format "%S\n" `(,label ,arg)))
-    (with-timeout (10 (error "prover process timeout"))
-      (while (and (memq (process-status prover--process) '(open run))
-                  (or (condition-case ()
-                          (progn
-                            (goto-char (point-min))
-                            (forward-sexp 1)
-                            (= (point) (point-min)))
-                        (scan-error t))))
-        (accept-process-output nil 0.05))
-      (cond ((not (memq (process-status prover--process) '(open run)))
-             (error "prover process: Died"))
-            ((= (point-min) (point))
-             (error "prover process: Empty response"))
-            (t
-             (let* ((str (buffer-substring (point-min) (point-max)))
-                    (result (eval (read str))))
-               (delete-region (point-min) (point-max))
-               (pcase result
-                 (`(response ,data ,goal)
-                  (prover--draw-response label arg data)
-                  (prover--draw-goal goal)))))))))
+    (process-send-string prover--process (format "%S\n" `(,label ,arg))))  
+  (let* ((str (prover--slurp))
+         (result
+          (condition-case ()
+              (eval (read str))
+            (error `(response ,str ,"")))))
+    (pcase result
+      (`(response ,data ,goal)
+       (prover--draw-response label arg data)
+       (prover--draw-goal goal)))))
 
 (defun prover-send-step ()
   "Send the proof step, and mark it read-only."
@@ -165,7 +182,7 @@
   "major mode for responses"
   nil)
 (defconst prover--responses-buffer-name " *prover responses*")
-(defun prover--draw-response (label arg prover-sexpr)
+(defun prover--draw-response-raw (text)
   (let* ((buf (get-buffer-create prover--responses-buffer-name))
          (new? (not (get-buffer-window buf)))
          (win (or (get-buffer-window buf)
@@ -177,12 +194,16 @@
         (setq scroll-conservatively 100)
         (setq buffer-read-only t)
         (goto-char (point-max))
-        (insert (pcase label
-                  (`send (format "> %s\n" arg))
-                  (`unsend "<\n")))
-        (insert (format "%s\n" prover-sexpr))))
+        (insert text)))
     (with-selected-window win
       (goto-char (point-max)))))
+(defun prover--draw-response (label arg prover-sexpr)
+  (prover--draw-response-raw
+   (format "%s\n%s\n"
+           (pcase label
+             (`send (format "> %s" arg))
+             (`unsend "<"))
+           prover-sexpr)))
 
 (provide 'prover-responses-mode)
 

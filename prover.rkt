@@ -3,6 +3,7 @@
          racket/pretty
          racket/match)
 
+(printf "ready\n")
 (let loop ([goal empty])
   (match (read)
     [(? eof-object?) (exit 0)]
